@@ -13,6 +13,7 @@ from .. import schemas
 from ..database import SessionLocal, get_session
 from ..models import ChatMessage, ChatSession, MessageRole, JourneyStage
 from ..orchestrator_client import generate_assistant_reply, run_onboarding
+from services.orchestrator.flows.staged_journey_flow import StageContext
 
 LOGGER = logging.getLogger(__name__)
 
@@ -226,6 +227,22 @@ async def send_message(
         user_message=schemas.ChatMessageRead.model_validate(user_message),
         assistant_message=schemas.ChatMessageRead.model_validate(assistant_message),
     )
+
+
+@router.get(
+    "/sessions/{session_id}/cached_prompt",
+    response_model=schemas.CachedPromptRead,
+)
+def get_cached_prompt(session_id: str, db: Session = Depends(get_session)) -> schemas.CachedPromptRead:
+    """Return cached prompt-engineering output for the session."""
+    session = _fetch_session(db, session_id)
+    context = StageContext.from_json(session.stage_context or "{}")
+    if not context.builder_prompt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No cached prompt available for this session.",
+        )
+    return schemas.CachedPromptRead(prompt=context.builder_prompt, session_id=session.id)
 
 
 @router.post(
