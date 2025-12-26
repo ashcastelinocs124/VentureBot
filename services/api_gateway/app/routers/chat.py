@@ -238,7 +238,8 @@ def get_cached_prompt(session_id: str, db: Session = Depends(get_session)) -> sc
     session = _fetch_session(db, session_id)
     try:
         context_data = json.loads(session.stage_context or "{}")
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("Failed to parse stage_context for session %s: %s", session_id, exc)
         context_data = {}
     builder_prompt = context_data.get("builder_prompt")
     if not builder_prompt:

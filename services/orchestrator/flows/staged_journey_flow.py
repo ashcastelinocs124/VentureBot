@@ -328,7 +328,11 @@ class StagedJourneyExecutor:
             )
         
         # Short-circuit prompt generation if we already have a cached builder prompt
-        if stage == JourneyStage.PROMPT_ENGINEERING and context.builder_prompt:
+        if (
+            stage == JourneyStage.PROMPT_ENGINEERING
+            and context.builder_prompt is not None
+            and str(context.builder_prompt).strip()
+        ):
             LOGGER.info("Using cached builder prompt for prompt_engineering stage.")
             return StageResult(
                 stage=stage,
