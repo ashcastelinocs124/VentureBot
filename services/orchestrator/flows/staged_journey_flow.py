@@ -331,7 +331,7 @@ class StagedJourneyExecutor:
         if (
             stage == JourneyStage.PROMPT_ENGINEERING
             and context.builder_prompt is not None
-            and str(context.builder_prompt).strip()
+            and len(str(context.builder_prompt).strip()) > 0
         ):
             LOGGER.info("Using cached builder prompt for prompt_engineering stage.")
             return StageResult(
