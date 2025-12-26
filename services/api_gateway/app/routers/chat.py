@@ -236,7 +236,10 @@ async def send_message(
 def get_cached_prompt(session_id: str, db: Session = Depends(get_session)) -> schemas.CachedPromptRead:
     """Return cached prompt-engineering output for the session."""
     session = _fetch_session(db, session_id)
-    context_data = json.loads(session.stage_context or "{}")
+    try:
+        context_data = json.loads(session.stage_context or "{}")
+    except json.JSONDecodeError:
+        context_data = {}
     builder_prompt = context_data.get("builder_prompt")
     if not builder_prompt:
         raise HTTPException(

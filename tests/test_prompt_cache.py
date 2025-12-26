@@ -52,7 +52,7 @@ def test_prompt_engineering_uses_cached_prompt_without_rerun(monkeypatch, client
     monkeypatch.setattr(
         StagedJourneyExecutor,
         "_run_task",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Should not run task when cached")),
+        lambda *args, **kwargs: pytest.fail("Should not run task when cached"),
     )
 
     session_id = _create_session(client)
