@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import logging
 from typing import Iterable, List
 
@@ -226,6 +227,27 @@ async def send_message(
         user_message=schemas.ChatMessageRead.model_validate(user_message),
         assistant_message=schemas.ChatMessageRead.model_validate(assistant_message),
     )
+
+
+@router.get(
+    "/sessions/{session_id}/cached_prompt",
+    response_model=schemas.CachedPromptRead,
+)
+def get_cached_prompt(session_id: str, db: Session = Depends(get_session)) -> schemas.CachedPromptRead:
+    """Return cached prompt-engineering output for the session."""
+    session = _fetch_session(db, session_id)
+    try:
+        context_data = json.loads(session.stage_context or "{}")
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("Failed to parse stage_context for session %s: %s", session_id, exc)
+        context_data = {}
+    builder_prompt = context_data.get("builder_prompt")
+    if builder_prompt is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No cached prompt available for this session.",
+        )
+    return schemas.CachedPromptRead(prompt=builder_prompt, session_id=session.id)
 
 
 @router.post(

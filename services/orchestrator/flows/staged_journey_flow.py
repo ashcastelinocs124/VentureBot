@@ -327,6 +327,18 @@ class StagedJourneyExecutor:
                 is_complete=True,
             )
         
+        # Short-circuit prompt generation if we already have a cached builder prompt
+        builder_prompt = context.builder_prompt
+        if stage == JourneyStage.PROMPT_ENGINEERING and builder_prompt and builder_prompt.strip():
+            LOGGER.info("Using cached builder prompt for prompt_engineering stage.")
+            return StageResult(
+                stage=stage,
+                output=builder_prompt,
+                next_stage=JourneyStage.COMPLETE,
+                context=context,
+                is_complete=True,
+            )
+
         task_key = STAGE_TO_TASK.get(stage)
         if not task_key:
             LOGGER.error(f"Unknown stage: {stage}")

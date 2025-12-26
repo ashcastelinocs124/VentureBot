@@ -51,3 +51,8 @@ class SessionStartResponse(BaseModel):
     session: ChatSessionRead
     onboarding_message: Optional[ChatMessageRead] = None
 
+
+class CachedPromptRead(BaseModel):
+    """Cached prompt response."""
+    prompt: str
+    session_id: str
