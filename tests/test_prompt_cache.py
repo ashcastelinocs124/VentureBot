@@ -1,12 +1,13 @@
 import json
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 # Ensure the test database is isolated
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-TEST_DB_PATH = os.path.abspath(os.path.join(DATA_DIR, "test_prompt_cache.sqlite3"))
+DATA_DIR = (Path(__file__).parent / ".." / "data").resolve()
+TEST_DB_PATH = (DATA_DIR / "test_prompt_cache.sqlite3").resolve()
 os.environ.setdefault("VENTUREBOTS_DATABASE_URL", f"sqlite:///{TEST_DB_PATH}")
 
 from services.api_gateway.app.main import app  # noqa: E402
@@ -18,9 +19,9 @@ from services.orchestrator.flows.staged_journey_flow import StagedJourneyExecuto
 @pytest.fixture(autouse=True)
 def _reset_db():
     engine.dispose()
-    os.makedirs(DATA_DIR, exist_ok=True)
-    if os.path.exists(TEST_DB_PATH):
-        os.remove(TEST_DB_PATH)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if TEST_DB_PATH.exists():
+        TEST_DB_PATH.unlink()
     # Recreate tables for each test to ensure isolation
     init_db()
     yield

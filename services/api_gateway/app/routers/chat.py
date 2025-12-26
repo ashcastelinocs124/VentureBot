@@ -242,7 +242,7 @@ def get_cached_prompt(session_id: str, db: Session = Depends(get_session)) -> sc
         LOGGER.warning("Failed to parse stage_context for session %s: %s", session_id, exc)
         context_data = {}
     builder_prompt = context_data.get("builder_prompt")
-    if not builder_prompt:
+    if builder_prompt is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No cached prompt available for this session.",
