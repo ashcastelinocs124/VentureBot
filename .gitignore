@@ -26,6 +26,7 @@ __pycache__/
 
 
 # Data directory
+data/*.sqlite3
 
 
 # System files
