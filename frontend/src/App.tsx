@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import "./App.css";
 import ReactMarkdown from "react-markdown";
@@ -13,6 +13,7 @@ type ChatMessage = {
   content: string;
   graph_data?: GraphData; // Optional graph data from backend
   created_at?: string;
+  suggested_replies?: string[];
 };
 
 type ChatSession = {
@@ -42,27 +43,74 @@ const API_BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
   "http://localhost:8000";
 
-const extractGraphData = (message: ChatMessage): ChatMessage => {
-  // Regex to find JSON block at the end of the message: ```json { ... } ```
-  const jsonBlockRegex = /```json\s*(\{[\s\S]*?"json_graph_data"[\s\S]*?\})\s*```/;
-  const match = message.content.match(jsonBlockRegex);
+const MAX_TEXTAREA_HEIGHT = 160;
+const SCROLL_THRESHOLD = 96;
 
-  if (match && match[1]) {
+const stripNextStageFooter = (content: string) => {
+  const footerRegex = /(?:\n|\r|\s)*---\s*\n\s*\*\*Next Stage:[\s\S]*$/i;
+  const plainFooterRegex = /(?:\n|\r|\s)*Next Stage:[\s\S]*$/i;
+  return content.replace(footerRegex, "").replace(plainFooterRegex, "").trim();
+};
+
+const extractGraphData = (message: ChatMessage): ChatMessage => {
+  const jsonBlockRegex = /```json\s*(\{[\s\S]*?"json_graph_data"[\s\S]*?\})\s*```/;
+  const fencedMatch = message.content.match(jsonBlockRegex);
+
+  const cleanContent = stripNextStageFooter(message.content);
+
+  if (fencedMatch && fencedMatch[1]) {
     try {
-      const parsed = JSON.parse(match[1]);
+      const parsed = JSON.parse(fencedMatch[1]);
       if (parsed.json_graph_data) {
-        // Return message with graph data and content STRIPPED of the JSON block
         return {
           ...message,
-          content: message.content.replace(match[0], '').trim(),
-          graph_data: parsed.json_graph_data
+          content: cleanContent.replace(fencedMatch[0], "").trim(),
+          graph_data: parsed.json_graph_data,
         };
       }
     } catch (e) {
       console.error("Failed to parse graph data JSON", e);
     }
   }
-  return message;
+
+  const graphIndex = cleanContent.indexOf("\"json_graph_data\"");
+  if (graphIndex !== -1) {
+    const startIndex = cleanContent.lastIndexOf("{", graphIndex);
+    if (startIndex !== -1) {
+      let depth = 0;
+      let endIndex = -1;
+      for (let i = startIndex; i < cleanContent.length; i += 1) {
+        const char = cleanContent[i];
+        if (char === "{") depth += 1;
+        if (char === "}") depth -= 1;
+        if (depth === 0) {
+          endIndex = i;
+          break;
+        }
+      }
+      if (endIndex !== -1) {
+        const jsonSlice = cleanContent.slice(startIndex, endIndex + 1);
+        try {
+          const parsed = JSON.parse(jsonSlice);
+          if (parsed.json_graph_data) {
+            const stripped = cleanContent.replace(jsonSlice, "").trim();
+            return {
+              ...message,
+              content: stripped,
+              graph_data: parsed.json_graph_data,
+            };
+          }
+        } catch (e) {
+          console.error("Failed to parse inline graph data JSON", e);
+        }
+      }
+    }
+  }
+
+  return {
+    ...message,
+    content: cleanContent,
+  };
 };
 
 const toWebSocketUrl = (baseUrl: string) => {
@@ -104,9 +152,9 @@ const getQuickReplies = (stage?: string): string[] => {
       // No quick replies during conversational onboarding
       return [];
     case "idea_generation":
-      return ["1", "2", "3", "4", "5"];
+      return [];
     case "validation":
-      return ["Proceed to PRD", "Try a different idea"];
+      return [];
     case "prd":
       return ["Generate prompts", "Refine requirements"];
     case "prompt_engineering":
@@ -114,6 +162,70 @@ const getQuickReplies = (stage?: string): string[] => {
     default:
       return [];
   }
+};
+
+const VALIDATION_SECTION_LABELS = [
+  "Market Size",
+  "Competitive Landscape",
+  "Feasibility Score",
+  "Key Risks",
+  "Recommendation",
+  "Actionable next steps",
+];
+
+const parseValidationContent = (content: string) => {
+  const lines = content.split("\n");
+  const sections: { title: string; body: string }[] = [];
+  let currentTitle: string | null = null;
+  let buffer: string[] = [];
+
+  const flush = () => {
+    if (currentTitle) {
+      sections.push({ title: currentTitle, body: buffer.join("\n").trim() });
+    }
+    buffer = [];
+  };
+
+  for (const line of lines) {
+    const cleaned = line.replace(/\*\*/g, "").trim();
+    const matchedTitle = VALIDATION_SECTION_LABELS.find(
+      (label) => cleaned.toLowerCase() === label.toLowerCase()
+    );
+    if (matchedTitle) {
+      flush();
+      currentTitle = matchedTitle;
+      continue;
+    }
+    if (currentTitle) {
+      buffer.push(line);
+    }
+  }
+  flush();
+
+  if (sections.length < 2) {
+    return null;
+  }
+
+  const allText = lines.join("\n");
+  const feasibilityLine = allText.match(/Feasibility Score:.*$/im)?.[0]?.trim() ?? "";
+  const recommendationLine = allText.match(/Recommendation:.*$/im)?.[0]?.trim() ?? "";
+  const risksSection = sections.find((section) => section.title === "Key Risks");
+  const topRisks = risksSection
+    ? risksSection.body
+        .split("\n")
+        .map((line) => line.replace(/^[\-\*\d\.\s]+/, "").trim())
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
+
+  return {
+    summary: {
+      feasibility: feasibilityLine,
+      recommendation: recommendationLine,
+      risks: topRisks,
+    },
+    sections,
+  };
 };
 
 function JourneyProgress({ currentStage }: { currentStage?: string }) {
@@ -207,6 +319,62 @@ function StageTransition({ stage }: { stage: string }) {
   );
 }
 
+function ValidationReport({
+  data,
+}: {
+  data: NonNullable<ReturnType<typeof parseValidationContent>>;
+}) {
+  const { summary, sections } = data;
+  const detailSections = sections.filter(
+    (section) => section.title !== "Feasibility Score" && section.title !== "Recommendation"
+  );
+
+  return (
+    <div className="validation-report">
+      <div className="validation-summary">
+        <div className="summary-header">Validation Snapshot</div>
+        <div className="summary-grid">
+          {summary.feasibility && (
+            <div className="summary-card">
+              <span className="summary-label">Feasibility</span>
+              <span className="summary-value">{summary.feasibility}</span>
+            </div>
+          )}
+          {summary.recommendation && (
+            <div className="summary-card">
+              <span className="summary-label">Recommendation</span>
+              <span className="summary-value">{summary.recommendation}</span>
+            </div>
+          )}
+        </div>
+        {summary.risks.length > 0 && (
+          <div className="summary-risks">
+            <span className="summary-label">Top Risks</span>
+            <ul>
+              {summary.risks.map((risk) => (
+                <li key={risk}>{risk}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <div className="validation-sections">
+        {detailSections.map((section) => (
+          <details key={section.title} className="validation-section" open={section.title === "Market Size"}>
+            <summary>{section.title}</summary>
+            <div className="validation-section-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {section.body}
+              </ReactMarkdown>
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [session, setSession] = useState<ChatSession | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -218,10 +386,15 @@ function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showStageTransition, setShowStageTransition] = useState(false);
   const [previousStage, setPreviousStage] = useState<string | null>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   const webSocketRef = useRef<WebSocket | null>(null);
   const streamingMessageRef = useRef<ChatMessage | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatWindowRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const lastMessageIdRef = useRef<string | null>(null);
 
   const isReady = status === "ready";
   const isConnectInFlight = status === "connecting" || status === "idle";
@@ -232,8 +405,35 @@ function App() {
   }, [session]);
 
   const quickReplies = useMemo(() => {
+    // Get the last assistant message to check if content is ready for quick replies
+    const lastAssistantMsg = [...messages].reverse().find(m => m.role === "assistant");
+    if (lastAssistantMsg?.suggested_replies?.length) {
+      return lastAssistantMsg.suggested_replies;
+    }
     return getQuickReplies(session?.current_stage);
-  }, [session?.current_stage]);
+  }, [session?.current_stage, messages]);
+
+  const isNearBottom = useCallback(() => {
+    const container = chatWindowRef.current;
+    if (!container) return true;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distanceFromBottom < SCROLL_THRESHOLD;
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
+    setUnreadCount(0);
+    setIsAtBottom(true);
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const nearBottom = isNearBottom();
+    setIsAtBottom(nearBottom);
+    if (nearBottom) {
+      setUnreadCount(0);
+    }
+  }, [isNearBottom]);
 
   // Handle stage transitions
   useEffect(() => {
@@ -297,8 +497,39 @@ function App() {
   }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(textarea.scrollHeight, MAX_TEXTAREA_HEIGHT);
+    textarea.style.height = `${nextHeight}px`;
+  }, [inputValue]);
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+
+    const lastMessage = messages[messages.length - 1];
+    const previousId = lastMessageIdRef.current;
+    const isNewMessage = lastMessage.id !== previousId;
+    const isStreamingFinalized =
+      previousId === "streaming" &&
+      lastMessage.id !== "streaming" &&
+      lastMessage.role === "assistant";
+
+    lastMessageIdRef.current = lastMessage.id;
+
+    if (
+      isNewMessage &&
+      !isStreamingFinalized &&
+      !isAtBottom &&
+      lastMessage.role === "assistant"
+    ) {
+      setUnreadCount((count) => count + 1);
+    }
+
+    if (isAtBottom || lastMessage.role === "user") {
+      scrollToBottom("smooth");
+    }
+  }, [messages, isAtBottom, scrollToBottom]);
 
   const connectWebSocket = (sessionId: string) => {
     const wsUrl = `${toWebSocketUrl(API_BASE_URL)}/api/chat/ws/${sessionId}`;
@@ -439,7 +670,15 @@ function App() {
         <StageTransition stage={session.current_stage} />
       )}
 
-      <main className="chat-window">
+      <main
+        className="chat-window"
+        ref={chatWindowRef}
+        onScroll={handleScroll}
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-busy={isSending}
+      >
         {messages.length === 0 && (
           <div className="empty-state">
             <div className="empty-state-icon">🔑</div>
@@ -467,33 +706,56 @@ function App() {
           </div>
         )}
 
-        {messages.map((message, index) => (
-          <article
-            key={message.id}
-            className={`message message--${message.role}`}
-            style={{ animationDelay: `${index * 0.05}s` }}
-          >
-            <div className="message-avatar">
-              {message.role === "user" ? "👤" : "🤖"}
-            </div>
-            <div className="message-bubble">
-              <div className="message-metadata">
-                <span className="message-role">
-                  {message.role === "user" ? "You" : "VentureBot"}
-                </span>
-                {message.created_at && (
-                  <time>{formatTimestamp(message.created_at)}</time>
+        {messages.map((message, index) => {
+          const previous = messages[index - 1];
+          const isGrouped = previous?.role === message.role;
+          const validationData =
+            message.role === "assistant" ? parseValidationContent(message.content) : null;
+
+          return (
+            <article
+              key={message.id}
+              className={`message message--${message.role} ${isGrouped ? "message--grouped" : ""}`}
+              style={{ animationDelay: `${index * 0.05}s` }}
+            >
+              <div
+                className={`message-avatar ${isGrouped ? "message-avatar--hidden" : ""}`}
+                aria-hidden={isGrouped ? "true" : undefined}
+              >
+                {message.role === "user" ? "👤" : "🤖"}
+              </div>
+              <div className="message-bubble">
+                {!isGrouped && (
+                  <div className="message-metadata">
+                    <span className="message-role">
+                      {message.role === "user" ? "You" : "VentureBot"}
+                    </span>
+                    {message.created_at && (
+                      <time>{formatTimestamp(message.created_at)}</time>
+                    )}
+                  </div>
                 )}
+                <div className="message-content">
+                  {validationData ? (
+                    <ValidationReport data={validationData} />
+                  ) : (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {message.content}
+                    </ReactMarkdown>
+                  )}
+                  {message.graph_data && <DataVisualizer data={message.graph_data} />}
+                </div>
               </div>
-              <div className="message-content">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {message.content}
-                </ReactMarkdown>
-                {message.graph_data && <DataVisualizer data={message.graph_data} />}
-              </div>
-            </div>
-          </article>
-        ))}
+            </article>
+          );
+        })}
+
+        {unreadCount > 0 && !isAtBottom && (
+          <button className="scroll-to-latest" onClick={() => scrollToBottom("smooth")}>
+            {unreadCount} new message{unreadCount > 1 ? "s" : ""}
+            <span aria-hidden="true">↓</span>
+          </button>
+        )}
 
         {isSending && <TypingIndicator />}
 
@@ -522,6 +784,8 @@ function App() {
             onChange={(event) => setInputValue(event.target.value)}
             disabled={!isReady || isSending}
             onKeyDown={handleComposerKeyDown}
+            ref={textareaRef}
+            aria-label="Message VentureBot"
           />
           <button
             type="submit"
